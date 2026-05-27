@@ -1,0 +1,87 @@
+name: milestone-rollover
+
+# Trigger on tag push (NOT release.published): GitHub blocks workflows
+# triggered by GITHUB_TOKEN-created releases from chaining further workflows.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to roll over (e.g. v0.3.0)"
+        required: true
+
+jobs:
+  rollover:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write    # milestones live under the issues scope
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Close current milestone and open next-patch milestone
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG_REF: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Validate tag shape (defence in depth; trigger filter already enforces it).
+          if ! printf '%s\n' "$TAG_REF" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Tag '$TAG_REF' is not vX.Y.Z; skipping rollover." >&2
+            exit 0
+          fi
+
+          CURRENT="$TAG_REF"
+          # Compute next patch milestone name: v<X>.<Y>.<Z+1>
+          VERSION="${CURRENT#v}"
+          MAJOR="${VERSION%%.*}"
+          REST="${VERSION#*.}"
+          MINOR="${REST%%.*}"
+          PATCH="${REST#*.}"
+          NEXT_PATCH=$((PATCH + 1))
+          NEXT="v${MAJOR}.${MINOR}.${NEXT_PATCH}"
+
+          echo "Current milestone: $CURRENT"
+          echo "Next milestone:    $NEXT"
+
+          # Look up the current milestone in any state so we can distinguish
+          # "doesn't exist" from "already closed".
+          CURRENT_ANY="$(gh api "repos/${GH_REPO}/milestones?state=all&per_page=100" \
+            --jq ".[] | select(.title == \"${CURRENT}\") | {number, state}" | head -n1)"
+
+          if [ -z "${CURRENT_ANY}" ]; then
+            echo "::warning::Milestone ${CURRENT} does not exist — release shipped without milestone tracking."
+          elif echo "${CURRENT_ANY}" | grep -q '"state":"closed"'; then
+            echo "Milestone ${CURRENT} is already closed; skipping."
+          else
+            CURRENT_NUM="$(echo "${CURRENT_ANY}" | jq -r '.number')"
+            echo "Closing milestone ${CURRENT} (#${CURRENT_NUM})"
+            gh api -X PATCH "repos/${GH_REPO}/milestones/${CURRENT_NUM}" \
+              -f state=closed >/dev/null
+          fi
+
+          # Look up the next-patch milestone in any state. If it exists and is
+          # closed, reopen it (so follow-up PRs have an open milestone to land in);
+          # if open, skip; if missing, create.
+          NEXT_ANY="$(gh api "repos/${GH_REPO}/milestones?state=all&per_page=100" \
+            --jq ".[] | select(.title == \"${NEXT}\") | {number, state}" | head -n1)"
+
+          if [ -z "${NEXT_ANY}" ]; then
+            echo "Creating milestone ${NEXT}"
+            gh api -X POST "repos/${GH_REPO}/milestones" \
+              -f title="${NEXT}" \
+              -f state="open" \
+              -f description="Auto-created by milestone-rollover after the ${CURRENT} tag push." \
+              >/dev/null
+          elif echo "${NEXT_ANY}" | grep -q '"state":"closed"'; then
+            NEXT_NUM="$(echo "${NEXT_ANY}" | jq -r '.number')"
+            echo "Reopening previously-closed milestone ${NEXT} (#${NEXT_NUM})"
+            gh api -X PATCH "repos/${GH_REPO}/milestones/${NEXT_NUM}" \
+              -f state=open >/dev/null
+          else
+            echo "Milestone ${NEXT} already exists and is open; skipping."
+          fi

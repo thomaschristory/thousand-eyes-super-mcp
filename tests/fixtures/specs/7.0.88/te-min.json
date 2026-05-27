@@ -1,0 +1,65 @@
+{
+  "openapi": "3.0.1",
+  "info": {"version": "7.0.88", "title": "ThousandEyes API (test fixture)"},
+  "servers": [{"url": "https://api.thousandeyes.com/v7"}],
+  "paths": {
+    "/tests": {
+      "get": {
+        "tags": ["Tests"],
+        "operationId": "getAllTests",
+        "summary": "List all tests",
+        "parameters": [
+          {"name": "aid", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "OK"}}
+      }
+    },
+    "/tests/{testId}": {
+      "get": {
+        "tags": ["Tests"],
+        "operationId": "getTest",
+        "summary": "Get a single test",
+        "parameters": [
+          {"name": "testId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "OK"}}
+      }
+    },
+    "/agents": {
+      "get": {
+        "tags": ["Agents"],
+        "operationId": "getAgents",
+        "summary": "List agents",
+        "parameters": [
+          {"name": "aid", "in": "query", "required": false, "schema": {"type": "string"}},
+          {"name": "cursor", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "OK"}}
+      }
+    },
+    "/alerts": {
+      "get": {
+        "tags": ["Alerts"],
+        "operationId": "getAlerts",
+        "summary": "List alerts (paginated, cursor)",
+        "parameters": [
+          {"name": "max", "in": "query", "required": false, "schema": {"type": "integer"}},
+          {"name": "cursor", "in": "query", "required": false, "schema": {"type": "string"}}
+        ],
+        "responses": {"200": {"description": "OK"}}
+      },
+      "post": {
+        "tags": ["Alerts"],
+        "operationId": "createAlertRule",
+        "summary": "Create an alert rule",
+        "requestBody": {"required": true, "description": "Alert rule body"},
+        "responses": {"201": {"description": "Created"}}
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {"type": "http", "scheme": "bearer"}
+    }
+  }
+}

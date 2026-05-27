@@ -1,0 +1,54 @@
+site_name: thousand-eyes-super-mcp
+site_description: FastMCP server for the Cisco ThousandEyes API
+site_url: https://thomaschristory.github.io/thousand-eyes-super-mcp/
+repo_url: https://github.com/thomaschristory/thousand-eyes-super-mcp
+repo_name: thomaschristory/thousand-eyes-super-mcp
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Data flow: architecture/data-flow.md
+  - Guides:
+      - Tool splitting: guides/tool-splitting.md
+  - Reference:
+      - CLI: reference/cli.md
+  - Contributing:
+      - Release process: contributing/release-process.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true

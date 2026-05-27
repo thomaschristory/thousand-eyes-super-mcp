@@ -1,0 +1,38 @@
+# Local secrets / config
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.uv/
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Docs
+site/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Claude Code agent state — per-clone, not source-of-truth
+.claude/
+
+# Superpowers scratch — designs, plans, findings, prompts. Never tracked.
+docs/superpowers/

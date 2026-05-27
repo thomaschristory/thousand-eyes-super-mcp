@@ -1,0 +1,38 @@
+thousand_eyes:
+  # ThousandEyes is a SaaS — base_url defaults to the public production API.
+  # Override for federal/regional endpoints if Cisco gives you one.
+  base_url: https://api.thousandeyes.com/v7
+  bearer_token: "${THOUSANDEYES_BEARER_TOKEN}"
+  # Optional: default ``aid`` (account group ID) injected into every request
+  # that accepts it. Leave empty to use the token's home account group.
+  account_group_id: "${THOUSANDEYES_ACCOUNT_GROUP_ID}"
+  verify_ssl: true
+  timeout: 30.0            # per-request httpx timeout (seconds)
+  retries:
+    max_attempts: 3        # total attempts incl. first try; 1 disables retries
+    statuses: [429, 502, 503, 504]
+    backoff_base: 0.5      # seconds; first backoff is base * 2**0 with jitter
+    backoff_cap: 8.0       # upper bound on a single backoff
+    retry_mutating: false  # default: only GET is retried
+
+thousand_eyes_mcp:
+  specs_dir: ./specs
+  active_version: "7.0.88"
+  max_actions_per_tool: 80               # adaptive splitter cap; 0 disables splitting
+  auto_fetch: true                       # auto-download spec for active_version when missing
+  pagination:
+    enabled: true
+    max_pages: 5
+    page_size: null
+
+transport:
+  mode: stdio                       # stdio | sse | streamable-http
+  host: 127.0.0.1
+  port: 8000
+  # HTTP transports (sse, streamable-http) only:
+  #   type: none    → no auth. Auto-demoted to 127.0.0.1 if host is non-loopback,
+  #                   unless you also pass --insecure-allow-public.
+  #   type: bearer  → require `Authorization: Bearer <token>` on every request.
+  auth:
+    type: none
+    # token: "${THOUSANDEYES_MCP_TOKEN}"
