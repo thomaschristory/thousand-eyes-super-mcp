@@ -4,17 +4,24 @@
 
 1. `main()` parses CLI args. Subcommand tokens (`fetch`, `list-versions`,
    `discover-versions`) short-circuit before the server starts.
-2. `load_config()` reads `thousand-eyes-mcp.yaml`, interpolates `${ENV_VAR}`
-   references, and validates bearer-auth requirements (length, type).
-3. `_maybe_auto_fetch()` downloads the active spec from DevNet pubhub if
+2. `_load_env()` discovers a `.env` from the current working directory (and
+   next to `--config`), so the token resolves even when the package is
+   installed in `site-packages`. Exported shell vars win over `.env`.
+3. `load_config()` assembles config from CLI > env vars > the (optional)
+   `thousand-eyes-mcp.yaml` > defaults, interpolates `${ENV_VAR}` references in
+   the YAML, and validates bearer-auth requirements (length, type). A missing
+   YAML is fine unless `--config` was passed explicitly.
+4. `require_credentials()` fails fast with an actionable error if the bearer
+   token is missing — **before** the expensive spec load/auto-fetch.
+5. `_maybe_auto_fetch()` downloads the active spec from DevNet pubhub if
    `auto_fetch: true` and the version directory is empty.
-4. `SpecLoader.load()` merges every spec file under `specs/<active_version>/`,
+6. `SpecLoader.load()` merges every spec file under `specs/<active_version>/`,
    extracts operations, runs the adaptive splitter, and returns a
    `SpecIndex` keyed by `action_name`.
-5. `Dispatcher.connect()` verifies the bearer token is set (no HTTP call).
-6. `register_tools()` registers one MCP tool per `ToolGroup`. Each tool's
+7. `Dispatcher.connect()` verifies the bearer token is set (no HTTP call).
+8. `register_tools()` registers one MCP tool per `ToolGroup`. Each tool's
    description lists every action with its parameter shape.
-7. `mcp.run(...)` enters the transport loop (stdio / SSE / streamable-http).
+9. `mcp.run(...)` enters the transport loop (stdio / SSE / streamable-http).
 
 ## Request
 

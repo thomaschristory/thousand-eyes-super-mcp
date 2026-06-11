@@ -22,11 +22,18 @@ uv tool install thousand-eyes-super-mcp
 
 ## Configure
 
-1. Copy `.env.example` to `.env` and fill in `THOUSANDEYES_BEARER_TOKEN`.
+1. Set `THOUSANDEYES_BEARER_TOKEN`. Either export it in your shell, drop it in
+   a `.env` (copy `.env.example`) in the directory you run from, or — when an
+   MCP client launches the server — put it in the client's server `env` block.
    Generate a token at <https://app.thousandeyes.com> under
    **Account Settings → Users and Roles → Profile → User API Tokens**.
 2. (Optional) Edit `thousand-eyes-mcp.yaml` for runtime knobs — transport,
    splitting cap, retries, pagination, default account group.
+
+The YAML file is **optional** — env vars alone are enough to run, which is what
+makes `uv tool install` + an MCP client work (the client's working directory
+isn't your project dir, so no YAML is on disk). Configuration precedence,
+highest first: **CLI flags → environment variables → YAML file → defaults**.
 
 ## Run
 

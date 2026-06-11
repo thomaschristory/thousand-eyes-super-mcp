@@ -100,9 +100,21 @@ def test_defaults_applied_for_minimal_config(tmp_path: Path) -> None:
     assert cfg.transport.auth.type == "none"
 
 
-def test_missing_file_raises(tmp_path: Path) -> None:
+def test_missing_file_returns_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The YAML file is optional (#3): an absent file yields defaults + env."""
+    for var in ("THOUSANDEYES_BEARER_TOKEN", "THOUSANDEYES_ACCOUNT_GROUP_ID"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = load_config(str(tmp_path / "nope.yaml"))
+    assert cfg.thousand_eyes.base_url == "https://api.thousandeyes.com/v7"
+    assert cfg.thousand_eyes.bearer_token == ""
+    assert cfg.thousand_eyes_mcp.active_version == "7.0.88"
+    assert cfg.transport.mode == "stdio"
+
+
+def test_missing_file_required_raises(tmp_path: Path) -> None:
+    """When the user explicitly asks for a file (required=True), missing errors."""
     with pytest.raises(FileNotFoundError):
-        load_config(str(tmp_path / "nope.yaml"))
+        load_config(str(tmp_path / "nope.yaml"), required=True)
 
 
 def test_missing_env_var_substitutes_empty(
@@ -153,7 +165,9 @@ def test_bearer_soft_min_warning(tmp_path: Path, capsys: pytest.CaptureFixture[s
 def test_unknown_auth_type_rejected(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("thousand_eyes:\n  bearer_token: x\ntransport:\n  auth:\n    type: oauth2\n")
-    with pytest.raises(ValueError, match=r"unknown transport\.auth\.type"):
+    # The Literal type now rejects unknown values during model construction
+    # (pydantic.ValidationError is a subclass of ValueError).
+    with pytest.raises(ValueError, match=r"transport\.auth\.type"):
         load_config(str(path))
 
 
@@ -182,3 +196,95 @@ def test_resolve_returns_path_unchanged(tmp_path: Path) -> None:
     resolved, used_legacy = resolve_config_path(str(tmp_path / "x.yaml"), explicit=True)
     assert resolved == str(tmp_path / "x.yaml")
     assert used_legacy is False
+
+
+# ---------------------------------------------------------------------------
+# Env-first config (#3): env vars resolve the token with no YAML on disk.
+# ---------------------------------------------------------------------------
+
+
+def test_token_from_env_without_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Core scenario for #3: no config file, token from THOUSANDEYES_BEARER_TOKEN."""
+    monkeypatch.setenv("THOUSANDEYES_BEARER_TOKEN", "tok-from-env")
+    monkeypatch.setenv("THOUSANDEYES_ACCOUNT_GROUP_ID", "98765")
+    cfg = load_config(str(tmp_path / "absent.yaml"))
+    assert cfg.thousand_eyes.bearer_token == "tok-from-env"
+    assert cfg.thousand_eyes.account_group_id == "98765"
+    assert cfg.thousand_eyes.base_url == "https://api.thousandeyes.com/v7"
+
+
+def test_env_overrides_yaml_but_preserves_other_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Env vars win over YAML, but unspecified YAML fields are preserved (deep merge)."""
+    monkeypatch.setenv("THOUSANDEYES_BEARER_TOKEN", "from-env")
+    monkeypatch.delenv("THOUSANDEYES_ACCOUNT_GROUP_ID", raising=False)
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text(
+        "thousand_eyes:\n  bearer_token: from-yaml\n  account_group_id: '4242'\n  timeout: 12.5\n"
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg.thousand_eyes.bearer_token == "from-env"  # env overrides
+    assert cfg.thousand_eyes.account_group_id == "4242"  # YAML preserved
+    assert cfg.thousand_eyes.timeout == 12.5  # YAML preserved
+
+
+def test_bare_sections_fall_back_to_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `thousand_eyes:` section (parses to None) must not crash."""
+    monkeypatch.delenv("THOUSANDEYES_BEARER_TOKEN", raising=False)
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("thousand_eyes:\nthousand_eyes_mcp:\ntransport:\n")
+    config = load_config(str(cfg))
+    assert config.thousand_eyes.base_url == "https://api.thousandeyes.com/v7"
+    assert config.thousand_eyes_mcp.active_version == "7.0.88"
+    assert config.transport.mode == "stdio"
+
+
+def test_verify_ssl_env_bool_coercion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """THOUSANDEYES_VERIFY_SSL=false must coerce to the bool False, not stay truthy.
+
+    A silent ``True`` for ``VERIFY_SSL=false`` would be a security bug.
+    """
+    monkeypatch.setenv("THOUSANDEYES_BEARER_TOKEN", "tok")
+    monkeypatch.setenv("THOUSANDEYES_VERIFY_SSL", "false")
+    cfg = load_config(str(tmp_path / "absent.yaml"))
+    assert cfg.thousand_eyes.verify_ssl is False
+    monkeypatch.setenv("THOUSANDEYES_VERIFY_SSL", "true")
+    cfg = load_config(str(tmp_path / "absent.yaml"))
+    assert cfg.thousand_eyes.verify_ssl is True
+
+
+def test_unquoted_numeric_yaml_coerced_to_str(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unquoted numeric YAML must coerce to str, matching the old loader (no crash).
+
+    Numeric account-group IDs are idiomatic YAML; `active_version: 7.0` parses
+    as a float. Both used to be wrapped in ``str(...)`` by the hand-rolled
+    loader — the pydantic models must keep accepting them.
+    """
+    monkeypatch.delenv("THOUSANDEYES_ACCOUNT_GROUP_ID", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "thousand_eyes:\n"
+        "  bearer_token: x\n"
+        "  account_group_id: 4242\n"
+        "thousand_eyes_mcp:\n"
+        "  active_version: 7.0\n"
+    )
+    cfg = load_config(str(path))
+    assert cfg.thousand_eyes.account_group_id == "4242"
+    assert cfg.thousand_eyes_mcp.active_version == "7.0"
+
+
+def test_retry_null_statuses_falls_back(tmp_path: Path) -> None:
+    """`statuses: ~` (YAML null) must fall back to defaults, not crash."""
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text(
+        "thousand_eyes:\n  bearer_token: x\n  retries:\n    max_attempts: 5\n    statuses: ~\n"
+    )
+    cfg = load_config(str(cfg_file))
+    assert cfg.thousand_eyes.retries.max_attempts == 5
+    assert cfg.thousand_eyes.retries.statuses == (429, 502, 503, 504)

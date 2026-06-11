@@ -24,6 +24,28 @@ class AuthError(RuntimeError):
     """Raised when the bearer token is missing or rejected."""
 
 
+def require_credentials(bearer_token: str) -> None:
+    """Raise a helpful error if the ThousandEyes bearer token is missing.
+
+    Called early at startup (before spec loading) to fail fast.
+    ``ThousandEyesAuth.login`` performs an equivalent inline check as
+    defense-in-depth.
+    """
+    if not bearer_token:
+        raise RuntimeError(
+            "ThousandEyes bearer token is not set.\n"
+            "Provide THOUSANDEYES_BEARER_TOKEN via either:\n"
+            "  - an exported shell environment variable, or\n"
+            "  - a .env file in the directory you run the command from "
+            "(or next to --config).\n"
+            "When launched by an MCP client (e.g. Claude Code), the client "
+            "does not inherit your shell exports — set it in the client's "
+            "server `env` block instead.\n"
+            "Generate a token at https://app.thousandeyes.com under "
+            "Account Settings → Users and Roles → Profile → User API Tokens."
+        )
+
+
 class ThousandEyesAuth:
     def __init__(self, *, bearer_token: str) -> None:
         self._token = bearer_token
