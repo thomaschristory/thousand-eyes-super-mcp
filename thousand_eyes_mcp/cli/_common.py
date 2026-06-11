@@ -37,7 +37,7 @@ def load_config_or_default(config_arg: str | None) -> AppConfig:
     explicit = config_arg is not None
     resolved, _ = resolve_config_path(config_arg or DEFAULT_CONFIG_PATH, explicit=explicit)
     try:
-        return load_config(resolved)
+        return load_config(resolved, required=explicit)
     except FileNotFoundError:
         if explicit:
             print(

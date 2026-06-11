@@ -17,13 +17,13 @@ from pathlib import Path
 from typing import Literal, cast
 
 import httpx
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from fastmcp import FastMCP
 from starlette.middleware import Middleware
 
 from . import __version__
-from .auth import ThousandEyesAuth
-from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config, resolve_config_path
+from .auth import ThousandEyesAuth, require_credentials
+from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
 from .diff import diff_versions, print_diff
 from .dispatcher import Dispatcher
 from .fetcher import (
@@ -104,12 +104,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _load_config_or_default(config_path: str) -> AppConfig:
-    try:
-        return load_config(config_path)
-    except FileNotFoundError:
-        print(f"[server] {config_path} not found — falling back to defaults", file=sys.stderr)
-        return AppConfig()
+def _load_env(config_path: str | None = None) -> None:
+    """Load a ``.env`` so ``${VAR}`` interpolation and credentials resolve.
+
+    python-dotenv's bare ``load_dotenv()`` searches upward from *this module's*
+    directory. Once the package is installed (``uv tool install`` / pipx), that
+    is site-packages — so a ``.env`` in the user's project dir is never found
+    (#3). We instead search the current working directory, and additionally
+    next to the ``--config`` file when one is given. Already-exported shell
+    variables always win (``override=False``).
+    """
+    # .env in the cwd (or any parent) — the usual "run it from my project" case.
+    cwd_env = find_dotenv(usecwd=True)
+    if cwd_env:
+        load_dotenv(cwd_env)
+    # .env beside the config file — covers `--config /elsewhere/thousand-eyes-mcp.yaml`.
+    if config_path:
+        cfg_env = Path(config_path).resolve().parent / ".env"
+        if cfg_env.is_file():
+            load_dotenv(cfg_env)
+
+
+def _load_config_or_default(config_path: str | None) -> AppConfig:
+    """Load config if present; otherwise return defaults (diff/fetch need no token)."""
+    return load_config(config_path or DEFAULT_CONFIG_PATH, required=config_path is not None)
 
 
 def run_diff(specs_dir: str, old_version: str, new_version: str) -> int:
@@ -160,8 +178,11 @@ async def _maybe_auto_fetch(
 async def _connect_and_register(
     args: argparse.Namespace,
 ) -> tuple[FastMCP, Dispatcher, TransportMode, str, int, list[Middleware]]:
-    load_dotenv()
-    config = _load_config_or_default(args.config)
+    _load_env(args.config)
+    config = load_config(args.config or DEFAULT_CONFIG_PATH, required=args.config is not None)
+
+    # Fail fast: spec loading (and auto-fetch) is pointless without a token.
+    require_credentials(config.thousand_eyes.bearer_token)
 
     version = args.version or config.thousand_eyes_mcp.active_version
     transport = args.transport or config.transport.mode
@@ -268,15 +289,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_discover_versions(rest)
 
     args = parse_args(raw)
-    explicit = args.config is not None
-    config_path, _used_legacy = resolve_config_path(
-        args.config or DEFAULT_CONFIG_PATH,
-        explicit=explicit,
-    )
-    args.config = config_path
 
     if args.diff:
-        config = _load_config_or_default(config_path)
+        _load_env(args.config)
+        config = _load_config_or_default(args.config)
         old, new = args.diff
         return run_diff(config.thousand_eyes_mcp.specs_dir, old, new)
 

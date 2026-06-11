@@ -5,6 +5,34 @@ All notable changes to thousand-eyes-super-mcp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] — 2026-06-11
+
+### Fixed
+- **Server no longer crashes with `FileNotFoundError: Config file not found`
+  when installed via `uv tool`/pipx and launched by an MCP client** (#3). The
+  YAML config file is now **optional**: the bearer token (and other settings)
+  can be supplied entirely through environment variables or a `.env` file.
+- `.env` discovery now searches the **current working directory** (and next to
+  `--config`) instead of upward from the installed package's `site-packages`
+  directory, so a `.env` in your project dir is actually found. Exported shell
+  variables still take precedence over `.env` values.
+
+### Added
+- Env-first configuration on `pydantic-settings`. Precedence, highest first:
+  **CLI overrides > environment variables > YAML file > built-in defaults**.
+  Documented env vars: `THOUSANDEYES_BEARER_TOKEN`,
+  `THOUSANDEYES_ACCOUNT_GROUP_ID`, `THOUSANDEYES_VERIFY_SSL`.
+- Fail-fast credential check: a missing bearer token now raises a clear,
+  actionable error **before** the (expensive) spec load/auto-fetch runs.
+- `load_config(path, *, required=False)` — pass `required=True` (done
+  automatically when `--config` is given explicitly) to error on a missing
+  file the user asked for; otherwise a missing file falls back to env+defaults.
+
+### Changed
+- New runtime dependencies: `pydantic>=2.0`, `pydantic-settings>=2.0`.
+
+[0.2.0]: https://github.com/thomaschristory/thousand-eyes-super-mcp/releases/tag/v0.2.0
+
 ## [0.1.0] — 2026-05-27
 
 First release. The `thousand-eyes-mcp` CLI runs end-to-end against the

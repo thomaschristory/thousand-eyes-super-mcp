@@ -1,24 +1,50 @@
-"""Loads thousand-eyes-mcp.yaml and resolves ${ENV_VAR} interpolation."""
+"""config.py — application configuration.
+
+Sources, highest priority first:
+
+    1. constructor kwargs (programmatic / CLI overrides applied in server.py)
+    2. environment variables (THOUSANDEYES_BEARER_TOKEN,
+       THOUSANDEYES_ACCOUNT_GROUP_ID, THOUSANDEYES_VERIFY_SSL)
+    3. the YAML config file (optional), with legacy ``${ENV}`` interpolation
+    4. built-in defaults
+
+The YAML file is **optional**: exporting the env vars (or putting them in a
+``.env``) is enough to run, which is what makes the server work when installed
+via ``uv tool install`` and launched by an MCP client (whose working directory
+is not the user's project dir, so no YAML is on disk). See issue #3.
+"""
 
 from __future__ import annotations
 
 import os
 import re
 import sys
-from dataclasses import dataclass, field
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, ClassVar, Literal
 
 import yaml
+from pydantic import BaseModel, Field, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
-# Minimum bearer-token lengths. Below the hard floor we refuse to start;
-# between the soft and hard floors we emit a stderr WARNING. 16 base64 chars
-# ≈ 96 bits of entropy, enough to resist online brute force when paired with
-# rate-limited logging.
+# Minimum bearer-token lengths for the HTTP-transport auth token. Below the
+# hard floor we refuse to start; between the soft and hard floors we emit a
+# stderr WARNING. 16 base64 chars ≈ 96 bits of entropy, enough to resist online
+# brute force when paired with rate-limited logging.
 _TOKEN_HARD_MIN = 8
 _TOKEN_SOFT_MIN = 16
 
 DEFAULT_CONFIG_PATH = "thousand-eyes-mcp.yaml"
+
+_VALID_AUTH_TYPES: frozenset[str] = frozenset({"none", "bearer"})
+
+# Default ThousandEyes retry statuses (kept as a module constant so a YAML
+# ``statuses: ~`` falls back here instead of crashing).
+_DEFAULT_RETRY_STATUSES: tuple[int, ...] = (429, 502, 503, 504)
 
 
 def resolve_config_path(path: str, *, explicit: bool) -> tuple[str, bool]:
@@ -28,25 +54,47 @@ def resolve_config_path(path: str, *, explicit: bool) -> tuple[str, bool]:
     one config filename, so ``used_legacy`` is always False — the tuple shape
     is preserved for parity with sibling projects that did have a rename.
     """
+    del explicit  # unused; kept for signature parity with sibling projects
     return path, False
 
 
-@dataclass
-class RetryConfig:
+# ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+
+class _Base(BaseModel):
+    """Shared base: drop YAML ``null`` values so model defaults apply."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_nones(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v is not None}
+        return data
+
+
+class RetryConfig(_Base):
     """Retry policy for transient HTTP failures from the ThousandEyes API."""
 
     max_attempts: int = 3  # total attempts including the first try
-    statuses: tuple[int, ...] = (429, 502, 503, 504)
+    statuses: tuple[int, ...] = _DEFAULT_RETRY_STATUSES
     backoff_base: float = 0.5  # seconds; first backoff is base * 2**0
-    backoff_cap: float = 8.0  # upper bound on a single backoff
+    backoff_cap: float = 8.0  # seconds; upper bound on a single backoff
     retry_mutating: bool = False  # by default, only GET is retried
 
+    @model_validator(mode="before")
+    @classmethod
+    def _statuses_none_to_default(cls, data: Any) -> Any:
+        if isinstance(data, dict) and data.get("statuses") is None:
+            data = {k: v for k, v in data.items() if k != "statuses"}
+        return data
 
-@dataclass
-class ThousandEyesConfig:
+
+class ThousandEyesConfig(_Base):
     """Upstream API connection settings.
 
-    ThousandEyes is a SaaS — `base_url` is fixed to the production URL by
+    ThousandEyes is a SaaS — ``base_url`` is fixed to the production URL by
     default but can be overridden for federal/regional endpoints.
     """
 
@@ -54,31 +102,25 @@ class ThousandEyesConfig:
     bearer_token: str = ""
     account_group_id: str = ""  # optional default ``aid`` query param
     verify_ssl: bool = True
-    timeout: float = 30.0
-    retries: RetryConfig = field(default_factory=RetryConfig)
+    timeout: float = 30.0  # seconds, applied to every ThousandEyes HTTP request
+    retries: RetryConfig = Field(default_factory=RetryConfig)
 
 
-@dataclass
-class PaginationConfig:
+class PaginationConfig(_Base):
     enabled: bool = True
     max_pages: int = 5
     page_size: int | None = None
 
 
-@dataclass
-class ThousandEyesMcpConfig:
+class ThousandEyesMcpConfig(_Base):
     specs_dir: str = "./specs"
     active_version: str = "7.0.88"
     max_actions_per_tool: int = 80  # 0 disables splitting (one tool per section)
-    pagination: PaginationConfig = field(default_factory=PaginationConfig)
+    pagination: PaginationConfig = Field(default_factory=PaginationConfig)
     auto_fetch: bool = True
 
 
-_VALID_AUTH_TYPES: frozenset[str] = frozenset({"none", "bearer"})
-
-
-@dataclass
-class TransportAuthConfig:
+class TransportAuthConfig(_Base):
     """Authentication for the HTTP transports (SSE, streamable-http).
 
     type='none' — no auth (only safe on loopback or behind a trusted proxy).
@@ -89,20 +131,93 @@ class TransportAuthConfig:
     token: str = ""
 
 
-@dataclass
-class TransportConfig:
+class TransportConfig(_Base):
     mode: str = "stdio"  # stdio | sse | streamable-http
     host: str = "127.0.0.1"
     port: int = 8000
-    auth: TransportAuthConfig = field(default_factory=TransportAuthConfig)
+    auth: TransportAuthConfig = Field(default_factory=TransportAuthConfig)
 
 
-@dataclass
-class AppConfig:
-    thousand_eyes: ThousandEyesConfig = field(default_factory=ThousandEyesConfig)
-    thousand_eyes_mcp: ThousandEyesMcpConfig = field(default_factory=ThousandEyesMcpConfig)
-    transport: TransportConfig = field(default_factory=TransportConfig)
+# ---------------------------------------------------------------------------
+# Settings sources
+# ---------------------------------------------------------------------------
 
+# YAML data for the current load_config() call. A ContextVar keeps load_config
+# re-entrant and thread-safe without leaking the path into module state.
+_yaml_data: ContextVar[dict[str, Any] | None] = ContextVar("_yaml_data", default=None)
+
+
+class _YamlSource(PydanticBaseSettingsSource):
+    """Feeds the (already interpolated) YAML dict into the settings model."""
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        return dict(_yaml_data.get() or {})
+
+
+class _ThousandEyesEnvSource(PydanticBaseSettingsSource):
+    """Maps the documented flat env vars onto ``thousand_eyes.*``.
+
+    These take precedence over the YAML file so the token/verify flag can be
+    overridden per-environment without editing the file (or with no file)."""
+
+    _MAP: ClassVar[dict[str, str]] = {
+        "THOUSANDEYES_BEARER_TOKEN": "bearer_token",
+        "THOUSANDEYES_ACCOUNT_GROUP_ID": "account_group_id",
+        "THOUSANDEYES_VERIFY_SSL": "verify_ssl",
+    }
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        thousand_eyes: dict[str, Any] = {}
+        for env_name, field in self._MAP.items():
+            value = os.environ.get(env_name)
+            if value:  # ignore unset and empty — let YAML/defaults stand
+                thousand_eyes[field] = value  # pydantic coerces str -> bool
+        return {"thousand_eyes": thousand_eyes} if thousand_eyes else {}
+
+
+class AppConfig(BaseSettings):
+    model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
+
+    thousand_eyes: ThousandEyesConfig = Field(default_factory=ThousandEyesConfig)
+    thousand_eyes_mcp: ThousandEyesMcpConfig = Field(default_factory=ThousandEyesMcpConfig)
+    transport: TransportConfig = Field(default_factory=TransportConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_none_sections(cls, data: Any) -> Any:
+        # A bare YAML section (e.g. `thousand_eyes:` with nothing under it)
+        # parses to None; drop it so the section's defaults apply instead of
+        # erroring.
+        if isinstance(data, dict):
+            return {k: v for k, v in data.items() if v is not None}
+        return data
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Priority: init kwargs > flat THOUSANDEYES_* env > YAML file > defaults.
+        return (
+            init_settings,
+            _ThousandEyesEnvSource(settings_cls),
+            _YamlSource(settings_cls),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Env var interpolation (legacy ${VAR} support inside YAML values)
+# ---------------------------------------------------------------------------
 
 _ENV_RE = re.compile(r"\$\{([^}]+)\}")
 
@@ -121,6 +236,7 @@ def _interpolate(value: str) -> str:
 
 
 def _interpolate_dict(obj: Any) -> Any:
+    """Recursively interpolate env vars in all string values of a dict."""
     if isinstance(obj, dict):
         return {k: _interpolate_dict(v) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -130,101 +246,68 @@ def _interpolate_dict(obj: Any) -> Any:
     return obj
 
 
-def load_config(path: str = DEFAULT_CONFIG_PATH) -> AppConfig:
-    config_path = Path(path)
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {path}")
+# ---------------------------------------------------------------------------
+# Loader
+# ---------------------------------------------------------------------------
 
-    raw = yaml.safe_load(config_path.read_text()) or {}
-    raw = _interpolate_dict(raw)
 
-    te_raw = raw.get("thousand_eyes", {}) or {}
-    mcp_raw = raw.get("thousand_eyes_mcp", {}) or {}
-    transport_raw = raw.get("transport", {}) or {}
+def _validate_transport_auth(transport: TransportConfig) -> None:
+    auth_type = transport.auth.type
+    token = transport.auth.token
 
-    retries_raw = te_raw.get("retries", {}) or {}
-    retry_defaults = RetryConfig()
-    statuses_raw = retries_raw.get("statuses") or list(retry_defaults.statuses)
-    retries = RetryConfig(
-        max_attempts=int(retries_raw.get("max_attempts", retry_defaults.max_attempts)),
-        statuses=tuple(int(s) for s in statuses_raw),
-        backoff_base=float(retries_raw.get("backoff_base", retry_defaults.backoff_base)),
-        backoff_cap=float(retries_raw.get("backoff_cap", retry_defaults.backoff_cap)),
-        retry_mutating=bool(retries_raw.get("retry_mutating", retry_defaults.retry_mutating)),
-    )
-
-    thousand_eyes = ThousandEyesConfig(
-        base_url=te_raw.get("base_url", "https://api.thousandeyes.com/v7"),
-        bearer_token=te_raw.get("bearer_token", ""),
-        account_group_id=str(te_raw.get("account_group_id", "") or ""),
-        verify_ssl=bool(te_raw.get("verify_ssl", True)),
-        timeout=float(te_raw.get("timeout", 30.0)),
-        retries=retries,
-    )
-
-    pagination_raw = mcp_raw.get("pagination", {}) or {}
-    pagination = PaginationConfig(
-        enabled=bool(pagination_raw.get("enabled", True)),
-        max_pages=int(pagination_raw.get("max_pages", 5)),
-        page_size=(
-            int(pagination_raw["page_size"])
-            if pagination_raw.get("page_size") is not None
-            else None
-        ),
-    )
-
-    thousand_eyes_mcp = ThousandEyesMcpConfig(
-        specs_dir=mcp_raw.get("specs_dir", "./specs"),
-        active_version=str(mcp_raw.get("active_version", "7.0.88")),
-        max_actions_per_tool=int(mcp_raw.get("max_actions_per_tool", 80)),
-        pagination=pagination,
-        auto_fetch=bool(mcp_raw.get("auto_fetch", True)),
-    )
-
-    auth_raw = transport_raw.get("auth", {}) or {}
-    auth_type_str = str(auth_raw.get("type", "none"))
-    auth_token = str(auth_raw.get("token", ""))
-
-    if auth_type_str not in _VALID_AUTH_TYPES:
+    if auth_type not in _VALID_AUTH_TYPES:  # pragma: no cover - Literal guards this
         raise ValueError(
-            f"unknown transport.auth.type: {auth_type_str!r}. "
+            f"unknown transport.auth.type: {auth_type!r}. "
             f"Choose one of {sorted(_VALID_AUTH_TYPES)}."
         )
-    auth_type: Literal["none", "bearer"] = cast(Literal["none", "bearer"], auth_type_str)
-
-    if auth_type == "bearer" and not auth_token:
+    if auth_type == "bearer" and not token:
         raise ValueError(
             "transport.auth.type=bearer requires a non-empty transport.auth.token "
             "(set ${THOUSANDEYES_MCP_TOKEN} or equivalent, or check the env var is exported)."
         )
-    if auth_type == "bearer" and len(auth_token) < _TOKEN_HARD_MIN:
+    if auth_type == "bearer" and len(token) < _TOKEN_HARD_MIN:
         raise ValueError(
-            f"transport.auth.token is too short ({len(auth_token)} chars); "
+            f"transport.auth.token is too short ({len(token)} chars); "
             f"require at least {_TOKEN_HARD_MIN} characters. "
             'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
         )
-    if auth_type == "bearer" and len(auth_token) < _TOKEN_SOFT_MIN:
+    if auth_type == "bearer" and len(token) < _TOKEN_SOFT_MIN:
         print(
             f"[config] WARNING: transport.auth.token is shorter than "
             f"{_TOKEN_SOFT_MIN} chars — recommend regenerating with "
             'python -c "import secrets; print(secrets.token_urlsafe(32))"',
             file=sys.stderr,
         )
-    if auth_type_str == "none" and auth_token:
+    if auth_type == "none" and token:
         raise ValueError(
             "token configured but transport.auth.type=none — "
             "set type: bearer to enable it, or remove the token."
         )
 
-    transport = TransportConfig(
-        mode=transport_raw.get("mode", "stdio"),
-        host=transport_raw.get("host", "127.0.0.1"),
-        port=int(transport_raw.get("port", 8000)),
-        auth=TransportAuthConfig(type=auth_type, token=auth_token),
-    )
 
-    return AppConfig(
-        thousand_eyes=thousand_eyes,
-        thousand_eyes_mcp=thousand_eyes_mcp,
-        transport=transport,
-    )
+def load_config(path: str = DEFAULT_CONFIG_PATH, *, required: bool = False) -> AppConfig:
+    """Build the application config.
+
+    The YAML file is optional. If it is absent and ``required`` is False, the
+    config is assembled from environment variables and defaults. Pass
+    ``required=True`` (server.py does this when ``--config`` is given
+    explicitly) to error on a missing file the user asked for.
+    """
+    config_path = Path(path)
+    raw: dict[str, Any] = {}
+
+    if config_path.exists():
+        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            raw = _interpolate_dict(loaded)
+    elif required:
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    token = _yaml_data.set(raw)
+    try:
+        config = AppConfig()
+    finally:
+        _yaml_data.reset(token)
+
+    _validate_transport_auth(config.transport)
+    return config
