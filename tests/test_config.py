@@ -256,6 +256,29 @@ def test_verify_ssl_env_bool_coercion(tmp_path: Path, monkeypatch: pytest.Monkey
     assert cfg.thousand_eyes.verify_ssl is True
 
 
+def test_unquoted_numeric_yaml_coerced_to_str(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unquoted numeric YAML must coerce to str, matching the old loader (no crash).
+
+    Numeric account-group IDs are idiomatic YAML; `active_version: 7.0` parses
+    as a float. Both used to be wrapped in ``str(...)`` by the hand-rolled
+    loader — the pydantic models must keep accepting them.
+    """
+    monkeypatch.delenv("THOUSANDEYES_ACCOUNT_GROUP_ID", raising=False)
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "thousand_eyes:\n"
+        "  bearer_token: x\n"
+        "  account_group_id: 4242\n"
+        "thousand_eyes_mcp:\n"
+        "  active_version: 7.0\n"
+    )
+    cfg = load_config(str(path))
+    assert cfg.thousand_eyes.account_group_id == "4242"
+    assert cfg.thousand_eyes_mcp.active_version == "7.0"
+
+
 def test_retry_null_statuses_falls_back(tmp_path: Path) -> None:
     """`statuses: ~` (YAML null) must fall back to defaults, not crash."""
     cfg_file = tmp_path / "c.yaml"

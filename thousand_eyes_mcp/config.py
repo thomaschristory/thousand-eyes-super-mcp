@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -64,7 +64,14 @@ def resolve_config_path(path: str, *, explicit: bool) -> tuple[str, bool]:
 
 
 class _Base(BaseModel):
-    """Shared base: drop YAML ``null`` values so model defaults apply."""
+    """Shared base: drop YAML ``null`` values so model defaults apply.
+
+    ``coerce_numbers_to_str`` preserves the old hand-rolled loader's ``str(...)``
+    behaviour: unquoted numeric YAML (e.g. ``account_group_id: 4242`` or a
+    numeric ``active_version``/token) is accepted as a string instead of raising.
+    """
+
+    model_config = ConfigDict(coerce_numbers_to_str=True)
 
     @model_validator(mode="before")
     @classmethod

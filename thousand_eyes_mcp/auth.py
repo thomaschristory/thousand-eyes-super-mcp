@@ -27,8 +27,9 @@ class AuthError(RuntimeError):
 def require_credentials(bearer_token: str) -> None:
     """Raise a helpful error if the ThousandEyes bearer token is missing.
 
-    Called early at startup (before spec loading) to fail fast, and again in
-    ``ThousandEyesAuth.login`` as defense-in-depth.
+    Called early at startup (before spec loading) to fail fast.
+    ``ThousandEyesAuth.login`` performs an equivalent inline check as
+    defense-in-depth.
     """
     if not bearer_token:
         raise RuntimeError(
