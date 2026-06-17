@@ -145,6 +145,22 @@ class TransportConfig(_Base):
     auth: TransportAuthConfig = Field(default_factory=TransportAuthConfig)
 
 
+class DebugConfig(_Base):
+    """Upstream request/response capture for diagnosing opaque tool errors.
+
+    Off by default and purely observational — when enabled the dispatcher
+    attaches a structured ``debug`` object (resolved request + full upstream
+    response) to error results and logs one JSON line to stderr. ``capture=all``
+    also captures successful calls. ``redact`` (on by default) masks auth
+    headers and credential-shaped body/query values so a capture is safe to
+    paste into an issue.
+    """
+
+    enabled: bool = False
+    redact: bool = True
+    capture: Literal["errors", "all"] = "errors"
+
+
 # ---------------------------------------------------------------------------
 # Settings sources
 # ---------------------------------------------------------------------------
@@ -188,12 +204,39 @@ class _ThousandEyesEnvSource(PydanticBaseSettingsSource):
         return {"thousand_eyes": thousand_eyes} if thousand_eyes else {}
 
 
+class _DebugEnvSource(PydanticBaseSettingsSource):
+    """Maps the documented debug env vars onto ``debug.*``.
+
+    Inserted ahead of the YAML source so the CLI > env > YAML precedence holds.
+    A present-but-falsy value (``THOUSANDEYES_MCP_DEBUG=0`` / ``=false``) still
+    flows through and is coerced by pydantic to ``enabled=False``; only an unset
+    or empty var is ignored so the YAML/default can stand."""
+
+    _MAP: ClassVar[dict[str, str]] = {
+        "THOUSANDEYES_MCP_DEBUG": "enabled",
+        "THOUSANDEYES_MCP_DEBUG_REDACT": "redact",
+        "THOUSANDEYES_MCP_DEBUG_CAPTURE": "capture",
+    }
+
+    def get_field_value(self, field: Any, field_name: str) -> tuple[Any, str, bool]:
+        return None, field_name, False
+
+    def __call__(self) -> dict[str, Any]:
+        debug: dict[str, Any] = {}
+        for env_name, field in self._MAP.items():
+            value = os.environ.get(env_name)
+            if value:  # ignore unset/empty; "0"/"false" are non-empty -> honoured
+                debug[field] = value  # pydantic coerces "false"/"0" -> bool
+        return {"debug": debug} if debug else {}
+
+
 class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(case_sensitive=False, extra="ignore")
 
     thousand_eyes: ThousandEyesConfig = Field(default_factory=ThousandEyesConfig)
     thousand_eyes_mcp: ThousandEyesMcpConfig = Field(default_factory=ThousandEyesMcpConfig)
     transport: TransportConfig = Field(default_factory=TransportConfig)
+    debug: DebugConfig = Field(default_factory=DebugConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -218,6 +261,7 @@ class AppConfig(BaseSettings):
         return (
             init_settings,
             _ThousandEyesEnvSource(settings_cls),
+            _DebugEnvSource(settings_cls),
             _YamlSource(settings_cls),
         )
 

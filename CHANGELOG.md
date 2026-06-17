@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Debug mode (off by default) to capture the exact upstream ThousandEyes
+  request/response** (#8). Enable with `--debug` (or `THOUSANDEYES_MCP_DEBUG=1`):
+  a failed tool call then attaches a structured `debug` object — resolved
+  method/path/url, query, serialized body, request/response headers and full
+  upstream status/body — to the error result and logs one
+  `[dispatcher][debug] {...}` JSON line to stderr. `--debug-all-calls`
+  (`capture=all`) also captures successful dict-shaped results.
+  Redaction is **on by default**: auth headers (`Authorization`, `Cookie`,
+  `Set-Cookie`) **and** credential-shaped body/query values (keys matching
+  `token`/`secret`/`password`/`apiKey`/`sessionId`/…, recursively) are masked so
+  a capture is safe to paste into an issue; `--debug-no-redact` disables it with
+  a warning. CLI > env > YAML precedence via `resolve_debug_config`. Default
+  (debug off) behaviour is byte-unchanged — purely observational, no new tool.
+
 ### Fixed
 - **Body-bearing `post_*`/`put_*`/`patch_*` actions now advertise their real
   top-level request-body fields instead of an opaque `body: object`, and the

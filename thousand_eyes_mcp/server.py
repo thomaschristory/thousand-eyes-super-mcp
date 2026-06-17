@@ -23,7 +23,7 @@ from starlette.middleware import Middleware
 
 from . import __version__
 from .auth import ThousandEyesAuth, require_credentials
-from .config import DEFAULT_CONFIG_PATH, AppConfig, load_config
+from .config import DEFAULT_CONFIG_PATH, AppConfig, DebugConfig, load_config
 from .diff import diff_versions, print_diff
 from .dispatcher import Dispatcher
 from .fetcher import (
@@ -89,6 +89,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="permit binding 0.0.0.0 with transport.auth.type=none (NOT recommended)",
     )
+    # Debug flags default to None so an unset flag never overrides an env/YAML
+    # setting; resolve_debug_config does the CLI > env > YAML merge.
+    parser.add_argument(
+        "--debug",
+        action="store_const",
+        const=True,
+        default=None,
+        help="capture the upstream request/response on failures (stderr + error envelope)",
+    )
+    parser.add_argument(
+        "--debug-all-calls",
+        action="store_const",
+        const=True,
+        default=None,
+        help="debug-capture successful calls too (implies --debug)",
+    )
+    parser.add_argument(
+        "--debug-no-redact",
+        action="store_const",
+        const=True,
+        default=None,
+        help="do NOT redact auth headers/secrets in debug captures (use with care)",
+    )
     parser.add_argument(
         "--diff",
         nargs=2,
@@ -128,6 +151,29 @@ def _load_env(config_path: str | None = None) -> None:
 def _load_config_or_default(config_path: str | None) -> AppConfig:
     """Load config if present; otherwise return defaults (diff/fetch need no token)."""
     return load_config(config_path or DEFAULT_CONFIG_PATH, required=config_path is not None)
+
+
+def resolve_debug_config(
+    base: DebugConfig,
+    *,
+    debug: bool | None = None,
+    all_calls: bool | None = None,
+    no_redact: bool | None = None,
+) -> DebugConfig:
+    """Merge CLI debug flags over the env/YAML-derived ``base`` (CLI > env > YAML).
+
+    Each flag defaults to ``None`` (flag absent) and only then overrides nothing,
+    so the env/YAML value stands. ``--debug-all-calls`` implies enabling capture;
+    ``--debug-no-redact`` turns redaction off.
+    """
+    enabled = base.enabled
+    if debug is not None:
+        enabled = debug
+    if all_calls:
+        enabled = True
+    capture = "all" if all_calls else base.capture
+    redact = False if no_redact else base.redact
+    return DebugConfig(enabled=enabled, redact=redact, capture=capture)
 
 
 def run_diff(specs_dir: str, old_version: str, new_version: str) -> int:
@@ -215,11 +261,30 @@ async def _connect_and_register(
                 Middleware(BearerAuthMiddleware, expected_token=config.transport.auth.token)
             )
 
+    debug_cfg = resolve_debug_config(
+        config.debug,
+        debug=getattr(args, "debug", None),
+        all_calls=getattr(args, "debug_all_calls", None),
+        no_redact=getattr(args, "debug_no_redact", None),
+    )
+
     print(
         f"[server] ThousandEyes Super MCP v{__version__} — "
         f"version={version}, RO={'no' if read_write else 'yes'}, transport={transport_mode}",
         file=sys.stderr,
     )
+    if debug_cfg.enabled:
+        print(
+            f"[server] DEBUG capture ON (capture={debug_cfg.capture}, "
+            f"redact={'on' if debug_cfg.redact else 'OFF'})",
+            file=sys.stderr,
+        )
+        if not debug_cfg.redact:
+            print(
+                "[server] WARNING: debug redaction is OFF — captured request/response "
+                "data may contain credentials; do not share captures publicly.",
+                file=sys.stderr,
+            )
 
     await _maybe_auto_fetch(
         auto_fetch=config.thousand_eyes_mcp.auto_fetch,
@@ -243,6 +308,7 @@ async def _connect_and_register(
         pagination=config.thousand_eyes_mcp.pagination,
         retry=config.thousand_eyes.retries,
         default_account_group_id=config.thousand_eyes.account_group_id,
+        debug=debug_cfg,
     )
     await dispatcher.connect()
     dispatcher.set_index(index)

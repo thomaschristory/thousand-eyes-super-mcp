@@ -132,7 +132,7 @@ def _register_group_tool(
                     f"Valid actions: {sorted(valid_actions)}"
                 ),
             }
-        return await dispatcher.call(action, params or {})
+        return await dispatcher.call(action, params or {}, tool_name=tool_name)
 
     tool_handler.__name__ = tool_name
     tool_handler.__doc__ = description
