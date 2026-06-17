@@ -16,8 +16,10 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98  # v3
 
       - name: Approve & enable auto-merge
+        # Only patch/minor bumps auto-merge (any ecosystem). semver-MAJOR — incl.
+        # a major github_actions bump pointing at a new upstream SHA — requires
+        # manual review, so a hijacked release cannot land on main unattended.
         if: >
-          steps.meta.outputs.package-ecosystem == 'github_actions' ||
           steps.meta.outputs.update-type == 'version-update:semver-patch' ||
           steps.meta.outputs.update-type == 'version-update:semver-minor'
         env:

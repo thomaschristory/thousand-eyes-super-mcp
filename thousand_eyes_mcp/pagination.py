@@ -145,6 +145,12 @@ class OffsetPaginator:
                 current[size_param] = effective_size
             page = await executor(op, current)
             page_dict = page if isinstance(page, dict) else {}
+            if pages and isinstance(page_dict, dict) and page_dict.get("error") is True:
+                # A follow-up page errored — surface it rather than truncating
+                # it out of the stitched envelope.
+                wrapped = _wrap(pages, truncated=True, next_cursor=None)
+                wrapped["_paginated"]["error"] = page_dict.get("message") or page_dict
+                return wrapped
             pages.append(page_dict)
 
             list_key = _first_list_key(page_dict)
@@ -203,6 +209,14 @@ class CursorPaginator:
                 call_params["_next_href"] = next_href
             page = await executor(op, call_params)
             page_dict = page if isinstance(page, dict) else {}
+            if pages and isinstance(page_dict, dict) and page_dict.get("error") is True:
+                # A follow-up page errored (e.g. an off-host _links.next.href
+                # refused by the SSRF guard). Surface it in the envelope instead
+                # of letting _wrap silently truncate it out of the stitched
+                # result, which would look like a clean end-of-results.
+                wrapped = _wrap(pages, truncated=True, next_cursor=None)
+                wrapped["_paginated"]["error"] = page_dict.get("message") or page_dict
+                return wrapped
             pages.append(page_dict)
 
             links = page_dict.get("_links") if isinstance(page_dict, dict) else None

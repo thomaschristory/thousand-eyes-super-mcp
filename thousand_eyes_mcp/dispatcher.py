@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json as _json
+import posixpath
 import random
 import re
 import sys
@@ -147,6 +148,42 @@ def _truncate_body(body: Any) -> Any:
         "_original_chars": len(serialized),
         "preview": serialized[:_MAX_DEBUG_BODY_CHARS],
     }
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    """Resolve the implicit default port so ``:443`` and an omitted port compare
+    equal for https (and ``:80`` for http)."""
+    if port is not None:
+        return port
+    return {"https": 443, "http": 80}.get(scheme.lower())
+
+
+def _same_origin(url: str, base_url: str) -> bool:
+    """True iff ``url`` is https and shares scheme/host/port with ``base_url``,
+    and its (normalised) path stays under the base path. Used to gate
+    cursor-pagination follows so the bearer token is never sent off-host (M1).
+
+    ``urlsplit`` lowercases the host and treats userinfo (``user@evil.com``) as
+    distinct from the host, so neither case-folding nor ``host@`` smuggling
+    bypasses the check. Default ports are normalised and ``..`` segments are
+    collapsed before the path-prefix test so neither an explicit ``:443`` href
+    is wrongly rejected nor a ``/v7/../admin`` href wrongly accepted."""
+    try:
+        u = urllib.parse.urlsplit(url)
+        b = urllib.parse.urlsplit(base_url)
+    except (ValueError, TypeError):
+        return False
+    if u.scheme.lower() != "https":
+        return False
+    u_origin = (u.scheme.lower(), u.hostname, _effective_port(u.scheme, u.port))
+    b_origin = (b.scheme.lower(), b.hostname, _effective_port(b.scheme, b.port))
+    if u_origin != b_origin:
+        return False
+    base_path = b.path.rstrip("/")
+    if not base_path:
+        return True
+    norm = posixpath.normpath(u.path)
+    return norm == base_path or norm.startswith(base_path + "/")
 
 
 def _pick_paginator(style: str | None) -> Paginator | None:
@@ -290,12 +327,15 @@ class Dispatcher:
                 unknown_params[key] = value
 
         if unknown_params:
+            # Drop, don't forward. MCP params are model/LLM-controlled; forwarding
+            # unrecognised keys onto authenticated requests would let a caller
+            # inject query params the OpenAPI spec never declared, weakening the
+            # spec-derived allow-list. Stay strictly within declared params (L2).
             print(
-                f"[dispatcher] WARNING: unrecognised params for '{op.action_name}': "
-                f"{list(unknown_params.keys())} — forwarding as query params",
+                f"[dispatcher] WARNING: ignoring unrecognised params for '{op.action_name}': "
+                f"{list(unknown_params.keys())} (not in the spec — not forwarded)",
                 file=sys.stderr,
             )
-            query_params.update(unknown_params)
 
         # Inject default ``aid`` if the op accepts one and caller didn't set it.
         if self._default_aid and "aid" in query_param_names and "aid" not in query_params:
@@ -305,7 +345,23 @@ class Dispatcher:
             # Cursor follow — use the server-provided absolute URL verbatim.
             # The href already encodes the cursor and all original params, so
             # path_params/query_params are ignored for follow-up calls.
+            #
+            # SSRF / token-exfiltration guard (M1): the href is fully
+            # response-controlled, and every request carries the bearer token,
+            # so a compromised/spoofed/cross-host ``_links.next.href`` could send
+            # the token to an attacker host (httpx lets an absolute URL override
+            # base_url). Refuse to follow anything that is not same-origin https
+            # with the configured base_url — the token is never sent off-host.
             url = str(next_href)
+            if not _same_origin(url, self._base_url):
+                return {
+                    "error": True,
+                    "message": (
+                        f"Refusing to follow off-host pagination URL for "
+                        f"'{op.action_name}': the server-provided _links.next.href host/scheme "
+                        f"does not match the configured base_url. The bearer token was NOT sent."
+                    ),
+                }
             send_params: dict[str, Any] | None = None
         else:
             url = op.path

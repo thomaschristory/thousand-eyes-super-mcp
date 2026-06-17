@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Cursor pagination no longer follows an off-host `_links.next.href`** (#5,
+  M1). The next-page URL is fully response-controlled and every request carries
+  the long-lived bearer token, so a spoofed/compromised/cross-host href could
+  exfiltrate the token (httpx lets an absolute URL override `base_url`). The
+  dispatcher now refuses to follow any next URL that is not same-origin `https`
+  with the configured `base_url` (and under its path prefix); the token is never
+  sent off-host.
+- **Unrecognised tool params are dropped instead of forwarded as query
+  parameters** (#5, L2). MCP params are model-controlled; forwarding non-spec
+  keys onto authenticated requests weakened the spec-derived allow-list. Calls
+  are now strictly limited to spec-declared params (a warning is logged).
+- **Container image runs as a non-root user** (#5, M2). The runtime stage adds
+  `USER app` (uid 10001), shrinking the blast radius of the network-reachable
+  SSE transport.
+- **`uv` build image is pinned to an immutable version + digest** (#5, I1)
+  instead of the mutable `:latest` tag, mirroring the SHA-pinning already
+  applied to GitHub Actions.
+- **Dependabot auto-merge no longer auto-merges semver-major bumps** (#5, M3).
+  The gate previously auto-merged *any* `github_actions` update (including a
+  major bump pointing at a new upstream SHA); it now auto-merges only
+  patch/minor updates, so a hijacked major release requires manual review.
+
 ### Added
 - **Debug mode (off by default) to capture the exact upstream ThousandEyes
   request/response** (#8). Enable with `--debug` (or `THOUSANDEYES_MCP_DEBUG=1`):
