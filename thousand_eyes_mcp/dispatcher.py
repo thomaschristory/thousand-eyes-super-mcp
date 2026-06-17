@@ -197,6 +197,22 @@ class Dispatcher:
                 }
             send_params = query_params or None
 
+        # Defensive unwrap: the tool schema lists body fields at the top level,
+        # but a caller that followed an older `body: object` convention may send
+        # ``{"body": {...}}``. Since body params are forwarded verbatim, that
+        # would double-wrap. If ``body`` is the *lone* body key AND the operation
+        # does not declare a genuine field named ``body``, unwrap it. This keeps
+        # old-convention callers working, lets array/scalar bodies be passed
+        # under ``body``, and never corrupts an endpoint whose real schema has a
+        # single top-level field literally named ``body``. See issue #9.
+        body_json: Any = body_params or None
+        if (
+            len(body_params) == 1
+            and "body" in body_params
+            and not any(f.name == "body" for f in op.body_fields)
+        ):
+            body_json = body_params["body"]
+
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -208,7 +224,7 @@ class Dispatcher:
                 method=op.method.upper(),
                 url=url,
                 params=send_params,
-                json=body_params if body_params else None,
+                json=body_json,
                 headers=headers,
                 retryable=self._is_retryable(op.method),
             )
@@ -236,7 +252,7 @@ class Dispatcher:
         method: str,
         url: str,
         params: dict[str, Any] | None,
-        json: dict[str, Any] | None,
+        json: Any,
         headers: dict[str, str],
         retryable: bool,
     ) -> httpx.Response:

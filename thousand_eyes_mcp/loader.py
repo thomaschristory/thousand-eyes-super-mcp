@@ -82,6 +82,14 @@ class OperationSpec:
     parameters: list[ParameterSpec] = field(default_factory=list)
     has_body: bool = False
     body_description: str = ""
+    # Resolved top-level fields of the request body (location="body"), when the
+    # requestBody schema is introspectable. Empty when the body is opaque or the
+    # spec is too malformed to resolve. See _parse_request_body.
+    body_fields: list[ParameterSpec] = field(default_factory=list)
+    # True when the request-body root resolves to a JSON array (not an object):
+    # such a body cannot be expressed as top-level params and is sent under a
+    # lone ``body`` key. See _body_root_type and tools._format_body.
+    body_array: bool = False
     pagination: Literal["link", "cursor", "offset"] | None = None
 
 
@@ -281,16 +289,190 @@ def _detect_pagination_style(
     return None
 
 
+_BODY_MEDIA_PREFERENCE = ("application/json", "application/merge-patch+json", "*/*")
+_MAX_REF_HOPS = 25
+
+
+def _resolve_schema_ref(schema: Any, schemas: dict[str, Any]) -> dict[str, Any]:
+    """Follow a chain of ``$ref`` hops to a concrete schema dict.
+
+    Returns ``{}`` on a dangling/cyclic/non-dict ref. Bounded by ``_MAX_REF_HOPS``
+    so a pathological ref chain cannot loop. Non-ref schemas are returned as-is.
+    """
+    current = schema
+    seen: set[str] = set()
+    hops = 0
+    while isinstance(current, dict) and isinstance(current.get("$ref"), str):
+        if hops >= _MAX_REF_HOPS:
+            return {}
+        name = current["$ref"].rsplit("/", 1)[-1]
+        if name in seen:
+            return {}
+        seen.add(name)
+        hops += 1
+        target = schemas.get(name)
+        if not isinstance(target, dict):
+            return {}
+        current = target
+    return current if isinstance(current, dict) else {}
+
+
+def _field_type(value: dict[str, Any], resolved: dict[str, Any]) -> str:
+    """Concrete type for a body property, following one ref hop via ``resolved``.
+
+    Fixes the ``$ref`` → always-``object`` mislabel: an enum/string component
+    referenced by a property reports its real ``string`` type.
+    """
+    declared = value.get("type") or resolved.get("type")
+    if isinstance(declared, str):
+        return declared
+    if value.get("properties") or resolved.get("properties") or resolved.get("allOf"):
+        return "object"
+    return "string"
+
+
+def _collect_body_fields(
+    schema: Any,
+    schemas: dict[str, Any],
+    visited: set[str],
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Resolve an OpenAPI schema into (field-info-by-name, required-field-names).
+
+    Follows ``$ref`` into ``#/components/schemas`` and merges ``allOf`` members.
+    ``visited`` is a *shared mutable* set of ref names already expanded: each
+    component schema is expanded at most once across the whole traversal, which
+    both cuts cycles and prevents exponential blow-up on diamond/duplicate-ref
+    ``allOf`` DAGs. Server-managed ``readOnly`` properties (e.g. HATEOAS
+    ``_links``, ``createdBy``) are excluded — they are response-only and must not
+    be advertised as writable body fields. ``isinstance``-guarded throughout so a
+    malformed schema degrades to "no fields" rather than raising.
+    """
+    props: dict[str, dict[str, Any]] = {}
+    required: set[str] = set()
+    if not isinstance(schema, dict):
+        return props, required
+
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        name = ref.rsplit("/", 1)[-1]
+        if name in visited:  # already expanded (cycle or diamond) — stop
+            return props, required
+        visited.add(name)
+        target = schemas.get(name)
+        if isinstance(target, dict):
+            return _collect_body_fields(target, schemas, visited)
+        return props, required
+
+    for sub in schema.get("allOf") or []:
+        sub_props, sub_required = _collect_body_fields(sub, schemas, visited)
+        props.update(sub_props)
+        required |= sub_required
+
+    sprops = schema.get("properties")
+    if isinstance(sprops, dict):
+        for key, value in sprops.items():
+            value = value if isinstance(value, dict) else {}
+            resolved = _resolve_schema_ref(value, schemas)
+            if value.get("readOnly") is True or resolved.get("readOnly") is True:
+                continue  # response-only field; not writable
+            default = value.get("default")
+            if default is None:
+                default = resolved.get("default")
+            props[str(key)] = {
+                "type": _field_type(value, resolved),
+                "description": value.get("description") or resolved.get("description") or "",
+                "default": default,
+            }
+
+    req = schema.get("required")
+    if isinstance(req, list):
+        required |= {r for r in req if isinstance(r, str)}
+
+    return props, required
+
+
+def _select_body_schema(operation: dict[str, Any]) -> Any:
+    """Pick the request-body schema by media-type preference (json first)."""
+    request_body = operation.get("requestBody")
+    if not isinstance(request_body, dict):
+        return None
+    content = request_body.get("content")
+    if not isinstance(content, dict):
+        return None
+    for media in _BODY_MEDIA_PREFERENCE:
+        entry = content.get(media)
+        if isinstance(entry, dict) and "schema" in entry:
+            return entry["schema"]
+    for entry in content.values():
+        if isinstance(entry, dict) and "schema" in entry:
+            return entry["schema"]
+    return None
+
+
+def _parse_request_body(
+    operation: dict[str, Any],
+    schemas: dict[str, Any],
+) -> list[ParameterSpec]:
+    """Extract the writable top-level body fields from a ``requestBody``.
+
+    Returns ``ParameterSpec`` entries with ``location="body"``. Degrades to an
+    empty list (never raises) for a missing/opaque/malformed/non-object body so a
+    single bad schema cannot break the whole spec load.
+    """
+    try:
+        schema = _select_body_schema(operation)
+        if not isinstance(schema, dict):
+            return []
+        props, required = _collect_body_fields(schema, schemas, set())
+        return [
+            ParameterSpec(
+                name=name,
+                location="body",
+                required=name in required,
+                type=info["type"],
+                description=info["description"],
+                default=info["default"],
+            )
+            for name, info in props.items()
+        ]
+    except Exception:  # pragma: no cover - defensive: degrade, never crash the load
+        return []
+
+
+def _body_root_type(operation: dict[str, Any], schemas: dict[str, Any]) -> str:
+    """Resolved JSON type of the request-body root (e.g. ``object``/``array``).
+
+    Used to render honest guidance for non-object bodies (a top-level array
+    cannot be expressed as top-level params). Empty string when unknown.
+    """
+    try:
+        schema = _select_body_schema(operation)
+        if not isinstance(schema, dict):
+            return ""
+        root = _resolve_schema_ref(schema, schemas)
+        root_type = root.get("type")
+        return root_type if isinstance(root_type, str) else ""
+    except Exception:  # pragma: no cover - defensive
+        return ""
+
+
 def _parse_operation(
     path: str,
     method: str,
     operation: dict[str, Any],
     tag: str,
+    schemas: dict[str, Any] | None = None,
 ) -> OperationSpec:
     has_body = "requestBody" in operation
     body_desc = ""
-    if has_body:
+    body_fields: list[ParameterSpec] = []
+    body_array = False
+    if has_body and isinstance(operation.get("requestBody"), dict):
         body_desc = operation["requestBody"].get("description", "Request body (JSON)")
+        body_fields = _parse_request_body(operation, schemas or {})
+        body_array = _body_root_type(operation, schemas or {}) == "array"
+    elif has_body:
+        body_desc = "Request body (JSON)"
 
     op_id = operation.get("operationId", f"{method}_{path}")
     parameters = _parse_parameters(operation.get("parameters", []))
@@ -304,6 +486,8 @@ def _parse_operation(
         parameters=parameters,
         has_body=has_body,
         body_description=body_desc,
+        body_fields=body_fields,
+        body_array=body_array,
         pagination=_detect_pagination_style(parameters),
     )
 
@@ -630,6 +814,10 @@ class SpecLoader:
 
     @staticmethod
     def _extract_operations(spec: dict[str, Any]) -> list[OperationSpec]:
+        components = spec.get("components")
+        schemas = components.get("schemas", {}) if isinstance(components, dict) else {}
+        if not isinstance(schemas, dict):
+            schemas = {}
         ops: list[OperationSpec] = []
         for path, path_item in spec.get("paths", {}).items():
             for method, operation in path_item.items():
@@ -638,7 +826,7 @@ class SpecLoader:
                 if not isinstance(operation, dict):
                     continue
                 tags = operation.get("tags") or ["Untagged"]
-                ops.append(_parse_operation(path, method.lower(), operation, tags[0]))
+                ops.append(_parse_operation(path, method.lower(), operation, tags[0], schemas))
         return ops
 
     # ------------------------------------------------------------------

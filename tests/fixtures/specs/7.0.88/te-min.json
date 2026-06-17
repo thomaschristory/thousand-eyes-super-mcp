@@ -52,14 +52,68 @@
         "tags": ["Alerts"],
         "operationId": "createAlertRule",
         "summary": "Create an alert rule",
-        "requestBody": {"required": true, "description": "Alert rule body"},
+        "requestBody": {
+          "required": true,
+          "description": "Alert rule body",
+          "content": {
+            "application/json": {"schema": {"$ref": "#/components/schemas/AlertRule"}}
+          }
+        },
         "responses": {"201": {"description": "Created"}}
+      }
+    },
+    "/alerts/{alertId}/labels": {
+      "put": {
+        "tags": ["Alerts"],
+        "operationId": "setAlertLabels",
+        "summary": "Replace the labels on an alert",
+        "parameters": [
+          {"name": "alertId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {
+          "required": true,
+          "description": "List of label IDs",
+          "content": {
+            "application/json": {"schema": {"type": "array", "items": {"type": "string"}}}
+          }
+        },
+        "responses": {"200": {"description": "OK"}}
       }
     }
   },
   "components": {
     "securitySchemes": {
       "BearerAuth": {"type": "http", "scheme": "bearer"}
+    },
+    "schemas": {
+      "AlertRule": {
+        "allOf": [
+          {"$ref": "#/components/schemas/AuditMeta"},
+          {
+            "type": "object",
+            "required": ["ruleName"],
+            "properties": {
+              "ruleName": {"type": "string", "description": "Human-readable rule name"},
+              "severity": {"$ref": "#/components/schemas/Severity"},
+              "notify": {"type": "boolean", "description": "Send notifications", "default": false},
+              "_links": {"$ref": "#/components/schemas/SelfLinks"}
+            }
+          }
+        ]
+      },
+      "AuditMeta": {
+        "type": "object",
+        "properties": {
+          "alertId": {"type": "string", "readOnly": true},
+          "createdBy": {"type": "string", "readOnly": true}
+        }
+      },
+      "Severity": {"type": "string", "enum": ["INFO", "WARNING", "CRITICAL"]},
+      "SelfLinks": {
+        "type": "object",
+        "readOnly": true,
+        "properties": {"self": {"type": "string"}}
+      }
     }
   }
 }

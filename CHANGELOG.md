@@ -5,6 +5,29 @@ All notable changes to thousand-eyes-super-mcp will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Body-bearing `post_*`/`put_*`/`patch_*` actions now advertise their real
+  top-level request-body fields instead of an opaque `body: object`, and the
+  dispatcher defensively unwraps a lone `{"body": {...}}` so callers that
+  followed the old convention still succeed** (#9). The tool description now
+  states once (only on tools that have a body-bearing action) that body fields
+  go at the **top level** of `params`. The loader resolves the `requestBody`
+  schema (following `$ref`, merging `allOf`) to extract field names, types,
+  descriptions and defaults, while:
+  - excluding server-managed `readOnly` fields (e.g. HATEOAS `_links`,
+    `createdBy`) so response-only fields are never advertised as writable;
+  - resolving a property's `$ref` to report its real type (e.g. an enum string
+    renders as `string`, not `object`);
+  - expanding each component schema at most once, so diamond / duplicate-`$ref`
+    `allOf` graphs cannot cause exponential blow-up during spec load;
+  - rendering array-rooted bodies as `body: array` (passed under a lone `body`
+    key) instead of the contradictory object/top-level phrasing;
+  - leaving a genuine lone field named `body` untouched (the dispatcher unwrap
+    is schema-aware), and degrading to "no fields" on any malformed schema
+    rather than crashing the whole load.
+
 ## [0.2.1] — 2026-06-11
 
 ### Changed
