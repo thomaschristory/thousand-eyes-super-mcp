@@ -27,7 +27,7 @@ from typing import Any
 from fastmcp import FastMCP
 
 from .dispatcher import Dispatcher, DispatchResult
-from .loader import ParameterSpec, SpecIndex, ToolGroup
+from .loader import OperationSpec, ParameterSpec, SpecIndex, ToolGroup
 
 
 def _format_param(p: ParameterSpec) -> str:
@@ -44,9 +44,36 @@ _PAGINATION_HINT = (
     "to force single-page mode)."
 )
 
+_BODY_HINT = (
+    "Request bodies: for object bodies, pass the body fields at the TOP LEVEL of "
+    "params — do NOT nest them under a 'body' key. Body-bearing actions list "
+    "their fields below as 'body fields (top-level): ...'. Array/scalar bodies "
+    "are the exception and are passed under a single 'body' key, as their "
+    "per-action line shows."
+)
+
+
+def _format_body(op: OperationSpec) -> str:
+    """Render the request-body signature for an action.
+
+    When the body schema is introspectable, list the real top-level fields so a
+    caller passes them directly in ``params``. An array-rooted body cannot be
+    expressed as top-level params, so it is passed under a lone ``body`` key.
+    Otherwise fall back to the opaque ``body: object`` form.
+    """
+    if op.body_fields:
+        rendered = ", ".join(_format_param(p) for p in op.body_fields)
+        return f"body fields (top-level): {rendered}"
+    if op.body_array:
+        return f"body: array — pass a JSON list under a lone 'body' key — {op.body_description}"
+    return f"body: object (pass its fields at the top level) — {op.body_description}"
+
 
 def _build_description(group: ToolGroup) -> str:
-    lines = [group.display_tag, "", _PAGINATION_HINT, "", "Actions:"]
+    lines = [group.display_tag, "", _PAGINATION_HINT]
+    if any(op.has_body for op in group.operations):
+        lines += ["", _BODY_HINT]
+    lines += ["", "Actions:"]
 
     for op in group.operations:
         path_params = [p for p in op.parameters if p.location == "path"]
@@ -58,7 +85,7 @@ def _build_description(group: ToolGroup) -> str:
         for p in query_params:
             param_parts.append(_format_param(p))
         if op.has_body:
-            param_parts.append(f"body: object — {op.body_description}")
+            param_parts.append(_format_body(op))
 
         params_str = ", ".join(param_parts) if param_parts else ""
         summary = op.summary.strip() if op.summary else ""
