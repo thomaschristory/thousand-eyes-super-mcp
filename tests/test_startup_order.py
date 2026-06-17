@@ -28,6 +28,9 @@ def _args(config: str) -> argparse.Namespace:
         read_write=False,
         insecure_allow_public=False,
         max_actions_per_tool=None,
+        debug=None,
+        debug_all_calls=None,
+        debug_no_redact=None,
     )
 
 
