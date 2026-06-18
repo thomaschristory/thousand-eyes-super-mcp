@@ -1,6 +1,6 @@
 [project]
 name = "thousand-eyes-super-mcp"
-version = "0.2.1"
+version = "0.3.0"
 description = "FastMCP server for the Cisco ThousandEyes API, generated dynamically from the official OpenAPI spec."
 readme = "README.md"
 requires-python = ">=3.11"
