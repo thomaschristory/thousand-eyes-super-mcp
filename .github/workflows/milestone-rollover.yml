@@ -12,6 +12,9 @@ on:
         description: "Tag to roll over (e.g. v0.3.0)"
         required: true
 
+permissions:
+  contents: read
+
 jobs:
   rollover:
     runs-on: ubuntu-latest
